@@ -1,338 +1,162 @@
 /**
- * TM.App — UI グルーコード
- * モード切替（作成 / シリーズ / 分析 / 運用）と各モジュールの結線。
+ * TM.Analysis — 分析・予測・学習モジュール
+ * コメント予測(#7) / トレンド推奨(#8) / ニッチ分析(#11) /
+ * コメントインサイト抽出(#12) / パフォーマンスフィードバックループ(#14) /
+ * 参考スタイル分析(#15)
  */
 window.TM = window.TM || {};
 
-TM.App = (() => {
-	const $ = (id) => document.getElementById(id);
-	const state = {
-		product: null,
-		script: null,      // 現在選択中のスクリプト
-		variations: [],    // A/B用バリエーション
-		series: [],        // Part1-3
-		styleProfile: null,
-	};
+TM.Analysis = (() => {
+	const FEEDBACK_KEY = 'tm_feedback';
 
-	// ---------- 初期化 ----------
-	function init() {
-		// セレクトボックスにライブラリを流し込む
-		fillSelect('hookSelect', TM.LIB.HOOKS.map((h) => [h.id, `${h.label} — ${h.desc}`]));
-		fillSelect('structureSelect', TM.LIB.STRUCTURES.map((s) => [s.id, `${s.label} — ${s.desc}`]));
-		$('apiKey').value = TM.Claude.getKey();
+	// ---- #7: コメント予測エンジン ----
+	// スクリプトから「付きやすいコメントの型」を予測し、固定コメント案まで出す。
+	function predictComments(script) {
+		const predictions = [];
+		const text = script.scenes.map((s) => s.text).join(' ');
 
-		// タブ切替
-		document.querySelectorAll('.tab').forEach((tab) => {
-			tab.addEventListener('click', () => {
-				document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
-				document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
-				tab.classList.add('active');
-				$(tab.dataset.panel).classList.add('active');
-			});
-		});
+		if (script.hookType === 'contrarian' || /賛否|正直/.test(text)) {
+			predictions.push({ type: '反論・議論', example: '「いや普通に◯◯の方が良くない？」', volume: '高', action: '反論には比較Part動画で返信（シリーズ化の起点）' });
+		}
+		if (/[？?]/.test(script.hook.text + (script.commentBait?.text || ''))) {
+			predictions.push({ type: '質問・回答', example: '「答え何？」「◯◯ってこと？」', volume: '高', action: '固定コメントで半分だけ答えて本編誘導' });
+		}
+		if (script.mode === 'ugc' || /体験|使って|買った/.test(text)) {
+			predictions.push({ type: '体験談共有', example: '「私も使ってるけど本当これ」', volume: '中', action: '体験談にはいいね+返信で信頼の輪を可視化' });
+		}
+		if (script.commentBait?.type === 'tag') {
+			predictions.push({ type: 'タグ付け', example: '「@friend これじゃん」', volume: '中', action: 'タグ付けコメントは放置でOK（自走する）' });
+		}
+		if (script.product.price) {
+			predictions.push({ type: '価格反応', example: `「${script.product.price}なら買うわ」`, volume: '中', action: '価格質問には即返信（購買直結）' });
+		}
 
-		$('apiKey').addEventListener('change', (e) => TM.Claude.setKey(e.target.value.trim()));
-		$('btnGenerate').addEventListener('click', () => generate(false));
-		$('btnVariations').addEventListener('click', () => generate(true));
-		$('btnSeries').addEventListener('click', generateSeries);
-		$('btnAnalyzeStyle').addEventListener('click', analyzeStyle);
-		$('btnPreview').addEventListener('click', () => state.script && TM.Renderer.preview($('canvas'), state.script));
-		$('btnStop').addEventListener('click', TM.Renderer.stopPreview);
-		$('btnExport').addEventListener('click', exportVideo);
-		$('btnThumbs').addEventListener('click', renderThumbnails);
-		$('btnCritic').addEventListener('click', runCritic);
-		$('btnCriticLoop').addEventListener('click', runCriticLoop);
-		$('btnNiche').addEventListener('click', runNiche);
-		$('btnInsights').addEventListener('click', runInsights);
-		$('btnAddTrend').addEventListener('click', addTrend);
-		$('btnRecordPerf').addEventListener('click', recordPerformance);
-
-		updateStreakBadge();
-		renderFeedbackTable();
+		const pinned = script.commentBait
+			? `固定コメント案: 「${script.commentBait.text}」→ 最初の10件に必ず返信して初速を作る`
+			: '固定コメント未設定';
+		return { predictions, pinned };
 	}
 
-	function fillSelect(id, pairs) {
-		$(id).innerHTML = pairs.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('');
+	// ---- #8: トレンドフォーマット推奨 ----
+	// 内蔵フォーマット + ユーザーが追記した「今週のトレンド」から商品に合うものを推奨。
+	function recommendTrends(product) {
+		const custom = loadCustomTrends();
+		const all = [...custom, ...TM.LIB.TREND_FORMATS];
+		const hay = `${product.category} ${product.raw}`.toLowerCase();
+		return all
+			.map((t) => {
+				const hits = (t.fit || []).filter((f) => hay.includes(f.toLowerCase())).length;
+				return { ...t, match: hits + (t.custom ? 1 : 0) }; // 手動追記トレンドは鮮度加点
+			})
+			.sort((a, b) => b.match - a.match)
+			.slice(0, 4);
+	}
+	function addCustomTrend(label, note) {
+		const list = loadCustomTrends();
+		list.unshift({ id: `custom_${Date.now()}`, label, note, fit: [], custom: true, addedAt: new Date().toISOString() });
+		try { localStorage.setItem('tm_trends', JSON.stringify(list.slice(0, 20))); } catch { /* ignore */ }
+		return list;
+	}
+	function loadCustomTrends() {
+		try { return JSON.parse(localStorage.getItem('tm_trends') || '[]'); } catch { return []; }
 	}
 
-	function esc(s) {
-		return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-	}
-
-	function toast(msg, isError = false) {
-		const el = $('toast');
-		el.textContent = msg;
-		el.className = `toast show${isError ? ' error' : ''}`;
-		setTimeout(() => el.classList.remove('show'), 3500);
-	}
-
-	function requireProduct() {
-		const raw = $('productInput').value.trim();
-		if (!raw) { toast('商品データを入力してください', true); return null; }
-		state.product = TM.Gen.parseProduct(raw);
-		return state.product;
-	}
-
-	function currentOpts() {
+	// ---- #11: ニッチ分析エージェント ----
+	// ニッチキーワードから攻め方の分析ブリーフを構造化して出す。
+	function analyzeNiche(keyword, product) {
+		const angles = [
+			{ angle: '初心者の失敗回避', hook: 'warning', why: '検索意図が強く保存されやすい' },
+			{ angle: '比較・ランキング', hook: 'contrarian', why: '議論コメントが伸びる' },
+			{ angle: 'ビフォーアフター実証', hook: 'beforeafter', why: '信頼と完走率を両取り' },
+			{ angle: '当事者あるある', hook: 'empathy', why: 'シェア・タグ付けが起きる' },
+		];
 		return {
-			hookId: $('hookSelect').value,
-			structureId: $('structureSelect').value,
-			mode: $('modeUgc').checked ? 'ugc' : 'normal',
-			styleProfile: state.styleProfile,
+			niche: keyword,
+			positioning: `「${keyword}」ニッチで${product?.name || 'この商品'}は「${angles[0].angle}」から参入し、シリーズで${angles[1].angle}へ展開するのが定石`,
+			angles,
+			postingPlan: ['週3本 × 3週間で同一ニッチに集中投下', '1本バズったら48時間以内にPart2', 'コメント上位の疑問を次動画のフックに昇格'],
+			checklist: ['同ニッチ上位10動画のフック型を記録したか', '競合が拾っていない不満コメントを見つけたか', 'ハッシュタグは大中小を混ぜたか'],
 		};
 	}
 
-	// ---------- 生成 ----------
-	async function generate(withVariations) {
-		const p = requireProduct();
-		if (!p) return;
-		toast(TM.Claude.available() ? 'Claudeで生成中…' : 'テンプレートで生成中…');
-		const opts = currentOpts();
-		if (withVariations) {
-			// #10: バリエーション一括生成（テンプレエンジンで即時、Claude利用時は本命のみClaude）
-			state.variations = TM.Gen.generateVariations(p, opts, 4);
-			if (TM.Claude.available()) {
-				const r = await TM.Claude.generate(p, opts);
-				state.variations.unshift(r.script);
-				if (r.error) toast(`Claude失敗→テンプレ: ${r.error}`, true);
+	// ---- #12: コメントインサイト自動抽出 ----
+	// 投稿後のコメント欄を貼り付けると、頻出テーマ・質問・感情を抽出して次の動画案を出す。
+	function extractInsights(commentsRaw) {
+		const comments = commentsRaw.split(/\n+/).map((c) => c.trim()).filter(Boolean);
+		const freq = {};
+		for (const c of comments) {
+			for (const w of TM.Score.keywords(c)) freq[w] = (freq[w] || 0) + 1;
+		}
+		const themes = Object.entries(freq).filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 8);
+		const questions = comments.filter((c) => /[？?]|教えて|どこで|いくら|どうやって/.test(c)).slice(0, 10);
+		const positive = comments.filter((c) => /良い|いい|欲しい|買|好き|神|すご/.test(c)).length;
+		const negative = comments.filter((c) => /微妙|高い|嘘|怪しい|いらな|うーん/.test(c)).length;
+		const nextIdeas = questions.slice(0, 3).map((q, i) => `Part${i + 2}案: コメント返信動画「${q.slice(0, 30)}」に答える`);
+		if (themes[0]) nextIdeas.push(`頻出テーマ「${themes[0][0]}」を深掘りする単発動画`);
+		return {
+			total: comments.length,
+			themes: themes.map(([word, count]) => ({ word, count })),
+			questions,
+			sentiment: { positive, negative, neutral: comments.length - positive - negative },
+			nextIdeas,
+		};
+	}
+
+	// ---- #14: パフォーマンスフィードバックループ ----
+	// 実投稿の結果を記録 → フック型/構造ごとの実績重みを算出 → 生成とスコアに反映。
+	function recordPerformance(entry) {
+		const list = loadPerformance();
+		list.unshift({ ...entry, recordedAt: new Date().toISOString() });
+		try { localStorage.setItem(FEEDBACK_KEY, JSON.stringify(list.slice(0, 200))); } catch { /* ignore */ }
+		return list;
+	}
+	function loadPerformance() {
+		try { return JSON.parse(localStorage.getItem(FEEDBACK_KEY) || '[]'); } catch { return []; }
+	}
+	function feedbackWeights() {
+		const list = loadPerformance();
+		const agg = { hooks: {}, structures: {} };
+		if (!list.length) return { hooks: {}, structures: {}, samples: 0 };
+		const engagement = (e) => (Number(e.views) || 0) * 0.001 + (Number(e.likes) || 0) * 0.05 + (Number(e.comments) || 0) * 0.5;
+		const byKey = (key) => {
+			const groups = {};
+			for (const e of list) {
+				if (!e[key]) continue;
+				(groups[e[key]] = groups[e[key]] || []).push(engagement(e));
 			}
-			state.series = [];
-			selectScript(state.variations[0]);
-			renderVariations();
-		} else {
-			const r = await TM.Claude.generate(p, opts);
-			if (r.error) toast(`Claude失敗→テンプレ: ${r.error}`, true);
-			state.variations = [];
-			state.series = [];
-			selectScript(r.script);
-			renderVariations();
-		}
+			const means = Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.reduce((a, b) => a + b, 0) / v.length]));
+			const overall = Object.values(means).reduce((a, b) => a + b, 0) / Math.max(Object.keys(means).length, 1) || 1;
+			// 平均比 0.8〜1.2 に正規化（1件の外れ値で暴れないように）
+			return Object.fromEntries(Object.entries(means).map(([k, v]) => [k, Math.min(Math.max(v / overall, 0.8), 1.2)]));
+		};
+		agg.hooks = byKey('hookType');
+		agg.structures = byKey('structure');
+		agg.samples = list.length;
+		return agg;
 	}
 
-	function generateSeries() {
-		const p = requireProduct();
-		if (!p) return;
-		state.series = TM.Gen.generateSeries(p, currentOpts());
-		state.variations = [];
-		selectScript(state.series[0]);
-		renderVariations();
-		toast('シリーズ Part1〜3 を生成しました');
+	// ---- #15: 参考スタイルの自動高度分析 ----
+	// 参考動画のスクリプト/説明文を貼ると、トーン・テンポ・フック型をプロファイル化。
+	function analyzeStyle(referenceText, name = '参考スタイル') {
+		const lines = referenceText.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+		const totalChars = lines.join('').length;
+		const exclam = (referenceText.match(/[!！]/g) || []).length;
+		const questions = (referenceText.match(/[?？]/g) || []).length;
+		const casual = TM.LIB.UGC.fillers.filter((f) => referenceText.includes(f)).length;
+		const estSec = totalChars / TM.Score.READ_SPEED;
+		const profile = {
+			name,
+			tone: exclam >= 3 ? 'excited' : casual >= 2 ? 'casual' : 'calm',
+			avgSceneSec: lines.length ? Math.min(Math.max(estSec / lines.length, 2), 8) : 4,
+			hookStyle: questions > 0 ? 'question' : /POV/i.test(referenceText) ? 'pov' : /実は|本当/.test(referenceText) ? 'secret' : 'shock',
+			estimatedDuration: Math.round(estSec),
+			markers: { exclam, questions, casual, lines: lines.length },
+		};
+		return profile;
 	}
 
-	function analyzeStyle() {
-		const ref = $('styleInput').value.trim();
-		if (!ref) { state.styleProfile = null; $('styleResult').textContent = '未設定'; return; }
-		state.styleProfile = TM.Analysis.analyzeStyle(ref);
-		$('styleResult').textContent =
-			`トーン=${state.styleProfile.tone} / 平均シーン${state.styleProfile.avgSceneSec.toFixed(1)}秒 / 推奨フック=${state.styleProfile.hookStyle}`;
-		toast('参考スタイルを解析しました。以降の生成に反映されます');
-	}
-
-	// ---------- 表示 ----------
-	function selectScript(script) {
-		state.script = script;
-		renderScript();
-		renderScore();
-		renderCommentPredictions();
-		renderTrends();
-		TM.Renderer.preview($('canvas'), script);
-	}
-
-	function renderScript() {
-		const s = state.script;
-		if (!s) return;
-		const rows = s.scenes.map((sc) =>
-			`<tr><td>${sc.t[0].toFixed(0)}–${sc.t[1].toFixed(0)}s</td><td class="role">${esc(sc.role)}</td><td>${esc(sc.text)}</td><td class="fx">${esc(sc.effect || '')}</td></tr>`
-		).join('');
-		$('scriptView').innerHTML = `
-			<div class="meta">
-				<span class="badge">${esc(s.structure)}</span>
-				<span class="badge">${esc(s.hookType)}</span>
-				<span class="badge">${s.mode === 'ugc' ? 'UGC' : '通常'}</span>
-				${s.seriesPart ? `<span class="badge series">Part${s.seriesPart.part}/${s.seriesPart.total}</span>` : ''}
-				${s.source === 'claude' ? '<span class="badge claude">Claude</span>' : ''}
-			</div>
-			<table><thead><tr><th>時間</th><th>役割</th><th>テキスト</th><th>FX</th></tr></thead><tbody>${rows}</tbody></table>
-			<p><b>CTA:</b> ${esc(s.cta)}</p>
-			<p><b>コメント誘発:</b> ${esc(s.commentBait?.text || 'なし')}</p>
-			<p><b>キャプション:</b> ${esc(s.caption)} ${s.hashtags.map((h) => esc(h)).join(' ')}</p>`;
-	}
-
-	function renderVariations() {
-		const list = state.variations.length ? state.variations : state.series;
-		if (!list.length) { $('variationsView').innerHTML = ''; return; }
-		const isSeries = !!state.series.length;
-		$('variationsView').innerHTML = `<h3>${isSeries ? 'シリーズ' : 'A/Bバリエーション'}</h3>` + list.map((v, i) => {
-			const score = TM.Score.viralScore(v).total;
-			const label = isSeries ? `Part${v.seriesPart.part}` : TM.LIB.HOOKS.find((h) => h.id === v.hookType)?.label || v.hookType;
-			return `<button class="variation ${v.id === state.script?.id ? 'selected' : ''}" data-i="${i}">
-				${esc(label)}<span class="vscore">${score}点</span><span class="vhook">${esc(v.hook.text)}</span></button>`;
-		}).join('');
-		$('variationsView').querySelectorAll('.variation').forEach((btn) => {
-			btn.addEventListener('click', () => selectScript(list[Number(btn.dataset.i)]));
-		});
-	}
-
-	function renderScore() {
-		const s = state.script;
-		if (!s) return;
-		const r = TM.Score.viralScore(s);
-		const bars = Object.entries(r.breakdown).map(([key, v]) => `
-			<div class="scorebar"><span class="label">${key}</span>
-				<div class="bar"><div class="fill ${v.score / v.max >= 0.8 ? 'good' : v.score / v.max >= 0.5 ? 'mid' : 'bad'}" style="width:${(v.score / v.max) * 100}%"></div></div>
-				<span class="pts">${v.score}/${v.max}</span><span class="note">${esc(v.note)}</span></div>`).join('');
-		$('scoreView').innerHTML = `
-			<div class="totalscore ${r.total >= 80 ? 'good' : r.total >= 60 ? 'mid' : 'bad'}">${r.total}<small>/100</small></div>
-			${bars}`;
-	}
-
-	function renderCommentPredictions() {
-		const pred = TM.Analysis.predictComments(state.script);
-		$('commentView').innerHTML = pred.predictions.map((p) =>
-			`<div class="pred"><b>${esc(p.type)}</b>（量:${esc(p.volume)}） ${esc(p.example)}<br><small>→ ${esc(p.action)}</small></div>`
-		).join('') + `<div class="pinned">${esc(pred.pinned)}</div>`;
-	}
-
-	function renderTrends() {
-		const trends = TM.Analysis.recommendTrends(state.product || { category: '', raw: '' });
-		$('trendView').innerHTML = trends.map((t) =>
-			`<div class="trend">${t.custom ? '🔥' : '📌'} <b>${esc(t.label)}</b><br><small>${esc(t.note || '')}</small></div>`
-		).join('');
-	}
-
-	// ---------- Critic ----------
-	function runCritic() {
-		if (!state.script) { toast('先にスクリプトを生成してください', true); return; }
-		const review = TM.Critic.run(state.script);
-		renderCriticResult(review, null);
-	}
-
-	function runCriticLoop() {
-		if (!state.script) { toast('先にスクリプトを生成してください', true); return; }
-		const result = TM.Critic.loop(state.script);
-		state.script = result.script;
-		renderScript();
-		renderScore();
-		TM.Renderer.preview($('canvas'), state.script);
-		renderCriticResult(result.review, result.history);
-		updateStreakBadge();
-	}
-
-	function renderCriticResult(review, history) {
-		const items = [
-			...review.critical.map((c) => `<li class="crit">🔴 ${esc(c)}</li>`),
-			...review.warnings.map((w) => `<li class="warn">🟡 ${esc(w)}</li>`),
-		].join('') || '<li class="ok">🟢 重大問題なし</li>';
-		const hist = history
-			? `<div class="history">${history.map((h) => `<div>Loop${h.iteration}: ${h.score}点 / 重大${h.critical.length}件</div>`).join('')}</div>`
-			: '';
-		$('criticView').innerHTML = `
-			<div class="verdict ${review.pass ? 'pass' : 'fail'}">${review.pass ? '✅ PASS' : '❌ FAIL'}（${review.score}点）</div>
-			<ul>${items}</ul>${hist}`;
-		updateStreakBadge();
-	}
-
-	function updateStreakBadge() {
-		const streak = TM.Critic.getStreak();
-		$('streakBadge').textContent = `Critic連続PASS: ${streak}/3${TM.Critic.isComplete() ? ' 🏆完成形' : ''}`;
-	}
-
-	// ---------- 書き出し ----------
-	async function exportVideo() {
-		if (!state.script) { toast('先にスクリプトを生成してください', true); return; }
-		toast('動画を書き出し中…（実時間かかります）');
-		try {
-			const { blob, mime } = await TM.Renderer.exportVideo($('canvas'), state.script, (p) => {
-				$('exportProgress').style.width = `${p * 100}%`;
-			});
-			$('exportProgress').style.width = '0%';
-			const ext = mime.includes('mp4') ? 'mp4' : 'webm';
-			download(URL.createObjectURL(blob), `tiktok_${state.script.id}.${ext}`);
-			toast('書き出し完了');
-		} catch (e) {
-			toast(`書き出し失敗: ${e.message}`, true);
-		}
-	}
-
-	function renderThumbnails() {
-		if (!state.script) { toast('先にスクリプトを生成してください', true); return; }
-		const cands = TM.Renderer.thumbnailCandidates(state.script);
-		$('thumbView').innerHTML = cands.map((c, i) => `
-			<figure class="thumb ${i === 0 ? 'best' : ''}">
-				<img src="${c.dataUrl}" alt="${esc(c.label)}">
-				<figcaption>${i === 0 ? '⭐ ' : ''}${esc(c.label)}（可読性${c.readability}）
-					<a href="${c.dataUrl}" download="thumb_${c.id}.png">保存</a></figcaption>
-			</figure>`).join('');
-	}
-
-	function download(url, name) {
-		const a = document.createElement('a');
-		a.href = url;
-		a.download = name;
-		a.click();
-	}
-
-	// ---------- 分析モード ----------
-	function runNiche() {
-		const kw = $('nicheInput').value.trim();
-		if (!kw) { toast('ニッチキーワードを入力してください', true); return; }
-		const r = TM.Analysis.analyzeNiche(kw, state.product);
-		$('nicheView').innerHTML = `
-			<p><b>ポジショニング:</b> ${esc(r.positioning)}</p>
-			<table><thead><tr><th>切り口</th><th>推奨フック</th><th>理由</th></tr></thead><tbody>
-			${r.angles.map((a) => `<tr><td>${esc(a.angle)}</td><td>${esc(a.hook)}</td><td>${esc(a.why)}</td></tr>`).join('')}
-			</tbody></table>
-			<p><b>投稿計画:</b></p><ul>${r.postingPlan.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
-			<p><b>チェックリスト:</b></p><ul>${r.checklist.map((x) => `<li>☐ ${esc(x)}</li>`).join('')}</ul>`;
-	}
-
-	function runInsights() {
-		const raw = $('commentsInput').value.trim();
-		if (!raw) { toast('コメントを貼り付けてください', true); return; }
-		const r = TM.Analysis.extractInsights(raw);
-		$('insightsView').innerHTML = `
-			<p><b>${r.total}件</b>を分析 — 😊${r.sentiment.positive} / 😐${r.sentiment.neutral} / 😞${r.sentiment.negative}</p>
-			<p><b>頻出テーマ:</b> ${r.themes.map((t) => `${esc(t.word)}(${t.count})`).join('、') || 'なし'}</p>
-			<p><b>質問コメント:</b></p><ul>${r.questions.map((q) => `<li>${esc(q)}</li>`).join('') || '<li>なし</li>'}</ul>
-			<p><b>次の動画案:</b></p><ul>${r.nextIdeas.map((x) => `<li>💡 ${esc(x)}</li>`).join('')}</ul>`;
-	}
-
-	function addTrend() {
-		const label = $('trendLabel').value.trim();
-		if (!label) { toast('トレンド名を入力してください', true); return; }
-		TM.Analysis.addCustomTrend(label, $('trendNote').value.trim());
-		$('trendLabel').value = '';
-		$('trendNote').value = '';
-		renderTrends();
-		toast('トレンドを追加しました。推奨に反映されます');
-	}
-
-	// ---------- 運用モード（フィードバックループ #14）----------
-	function recordPerformance() {
-		if (!state.script && !$('perfHook').value) { toast('スクリプト未選択の場合はフック型を選んでください', true); return; }
-		TM.Analysis.recordPerformance({
-			scriptId: state.script?.id || 'manual',
-			hookType: state.script?.hookType || $('perfHook').value,
-			structure: state.script?.structure || '',
-			views: Number($('perfViews').value) || 0,
-			likes: Number($('perfLikes').value) || 0,
-			comments: Number($('perfComments').value) || 0,
-		});
-		renderFeedbackTable();
-		toast('実績を記録しました。以降のスコアと生成に反映されます');
-	}
-
-	function renderFeedbackTable() {
-		const list = TM.Analysis.loadPerformance();
-		const w = TM.Analysis.feedbackWeights();
-		fillSelect('perfHook', TM.LIB.HOOKS.map((h) => [h.id, h.label]));
-		$('feedbackView').innerHTML = `
-			<p><b>学習済み重み</b>（${w.samples || 0}本の実績から）: ${Object.entries(w.hooks || {}).map(([k, v]) => `${esc(k)}=${v.toFixed(2)}`).join(' / ') || 'まだ実績なし'}</p>
-			<table><thead><tr><th>日時</th><th>フック型</th><th>再生</th><th>いいね</th><th>コメント</th></tr></thead><tbody>
-			${list.slice(0, 15).map((e) => `<tr><td>${esc((e.recordedAt || '').slice(0, 10))}</td><td>${esc(e.hookType)}</td><td>${e.views}</td><td>${e.likes}</td><td>${e.comments}</td></tr>`).join('')}
-			</tbody></table>`;
-	}
-
-	document.addEventListener('DOMContentLoaded', init);
-	return { state };
+	return {
+		predictComments, recommendTrends, addCustomTrend, analyzeNiche, extractInsights,
+		recordPerformance, loadPerformance, feedbackWeights, analyzeStyle,
+	};
 })();

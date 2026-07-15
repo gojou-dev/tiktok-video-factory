@@ -1,41 +1,146 @@
-🎬 TikTok動画工場 大バズ特化版 v2
-Critic連続PASS: 0/3
-✍️ 作成 🔍 分析 📈 運用
-1. 商品データ
-商品ページの内容を貼り付け。「商品名: / 価格: / ターゲット: / カテゴリ:」ラベルと「・」箇条書きの特徴を推奨。ここに無い情報は動画に使われません（忠実度担保）。
-2. 生成設定
-フック型（#1） 構造テンプレート（#2） UGCモード（#6）— 広告臭を消して「本物らしさ」最大化
-参考スタイル分析（#15）
-スタイルを解析して反映
-未設定
-Claude API（任意 — 未設定ならテンプレート生成）
-キーはこのブラウザのlocalStorageにのみ保存されます。
-🎯 生成 🧪 A/B 4本（#10） 📚 シリーズ Part1-3（#9）
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎬 TikTok動画工場 — 大バズ特化版 v2</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+	<h1>🎬 TikTok動画工場 <small>大バズ特化版 v2</small></h1>
+	<div class="streak" id="streakBadge">Critic連続PASS: 0/3</div>
+</header>
 
-3. プレビュー & 書き出し
+<nav class="tabs">
+	<button class="tab active" data-panel="panelCreate">✍️ 作成</button>
+	<button class="tab" data-panel="panelAnalysis">🔍 分析</button>
+	<button class="tab" data-panel="panelOps">📈 運用</button>
+</nav>
 
-▶ 再生 ⏹ 停止 💾 動画書き出し 🖼 サムネ3案（#13）
+<main>
+<section class="panel active" id="panelCreate">
+	<div class="grid3">
+		<div class="card">
+			<h2>1. 商品データ</h2>
+			<p class="hint">商品ページの内容を貼り付け。「商品名: / 価格: / ターゲット: / カテゴリ:」ラベルと「・」箇条書きの特徴を推奨。ここに無い情報は動画に使われません（忠実度担保）。</p>
+			<textarea id="productInput" rows="8" placeholder="商品名: 〇〇&#10;価格: ¥0,000&#10;ターゲット: ...&#10;カテゴリ: ...&#10;・特徴1&#10;・特徴2"></textarea>
 
+			<h2>2. 生成設定</h2>
+			<label for="hookSelect">フック型（#1）</label>
+			<select id="hookSelect"></select>
+			<label for="structureSelect">構造テンプレート（#2）</label>
+			<select id="structureSelect"></select>
+			<label class="check"><input type="checkbox" id="modeUgc"> UGCモード（#6）— 広告臭を消して「本物らしさ」最大化</label>
 
-4. バズり予測スコア（#5）
-生成するとスコアが表示されます（合格ライン80点）
-5. Critic Agent
-🧑‍⚖️ 審査する 🔁 自動修正ループ
+			<details>
+				<summary>参考スタイル分析（#15）</summary>
+				<label for="styleInput">スタイルを解析して反映</label>
+				<textarea id="styleInput" rows="3" placeholder="参考にしたい動画の台本・キャプションなどを貼り付け"></textarea>
+				<button id="btnAnalyzeStyle">解析</button>
+				<p class="hint" id="styleResult">未設定</p>
+			</details>
 
-コメント予測（#7）
-生成すると予測が表示されます
-トレンド推奨（#8）
+			<details>
+				<summary>Claude API（任意 — 未設定ならテンプレート生成）</summary>
+				<input type="password" id="apiKey" placeholder="sk-ant-...">
+				<p class="hint">キーはこのブラウザのlocalStorageにのみ保存されます。</p>
+			</details>
 
-追加
-ニッチ分析エージェント（#11）
-分析
+			<div class="btnrow">
+				<button class="primary" id="btnGenerate">🎯 生成</button>
+				<button id="btnVariations">🧪 A/B 4本（#10）</button>
+				<button id="btnSeries">📚 シリーズ Part1-3（#9）</button>
+			</div>
+			<div id="variationsView"></div>
+		</div>
 
-コメントインサイト抽出（#12）
-投稿済み動画のコメント欄を1行1コメントで貼り付け
-インサイト抽出
+		<div class="card">
+			<h2>3. プレビュー &amp; 書き出し</h2>
+			<canvas id="canvas" width="1080" height="1920"></canvas>
+			<div class="btnrow">
+				<button id="btnPreview">▶ 再生</button>
+				<button id="btnStop">⏹ 停止</button>
+				<button id="btnExport">💾 動画書き出し</button>
+				<button id="btnThumbs">🖼 サムネ3案（#13）</button>
+			</div>
+			<div class="progress"><div id="exportProgress"></div></div>
+			<div class="thumbs" id="thumbView"></div>
+			<div class="script" id="scriptView"></div>
+		</div>
 
-パフォーマンスフィードバックループ（#14）
-投稿結果を記録すると、フック型ごとの実績重みが学習され、以降のスコアリング・A/B生成順に自動反映されます。
-記録
+		<div class="card">
+			<h2>4. バズり予測スコア（#5）</h2>
+			<div id="scoreView"><p class="hint">生成するとスコアが表示されます（合格ライン80点）</p></div>
 
+			<h2>5. Critic Agent</h2>
+			<div class="btnrow">
+				<button id="btnCritic">🧑‍⚖️ 審査する</button>
+				<button id="btnCriticLoop">🔁 自動修正ループ</button>
+			</div>
+			<div id="criticView"></div>
 
+			<h2>コメント予測（#7）</h2>
+			<div id="commentView"><p class="hint">生成すると予測が表示されます</p></div>
+
+			<h2>トレンド推奨（#8）</h2>
+			<div id="trendView"></div>
+			<div class="btnrow">
+				<input type="text" id="trendLabel" placeholder="トレンド名">
+				<input type="text" id="trendNote" placeholder="メモ（任意）">
+				<button id="btnAddTrend">追加</button>
+			</div>
+		</div>
+	</div>
+</section>
+
+<section class="panel" id="panelAnalysis">
+	<div class="grid2">
+		<div class="card">
+			<h2>ニッチ分析エージェント（#11）</h2>
+			<div class="btnrow">
+				<input type="text" id="nicheInput" placeholder="ニッチキーワード">
+				<button id="btnNiche">分析</button>
+			</div>
+			<div id="nicheView"></div>
+		</div>
+
+		<div class="card">
+			<h2>コメントインサイト抽出（#12）</h2>
+			<p class="hint">投稿済み動画のコメント欄を1行1コメントで貼り付け</p>
+			<textarea id="commentsInput" rows="8"></textarea>
+			<button id="btnInsights">インサイト抽出</button>
+			<div id="insightsView"></div>
+		</div>
+	</div>
+</section>
+
+<section class="panel" id="panelOps">
+	<div class="card">
+		<h2>パフォーマンスフィードバックループ（#14）</h2>
+		<p class="hint">投稿結果を記録すると、フック型ごとの実績重みが学習され、以降のスコアリング・A/B生成順に自動反映されます。</p>
+		<div class="btnrow">
+			<select id="perfHook"></select>
+			<input type="number" id="perfViews" placeholder="再生数" min="0">
+			<input type="number" id="perfLikes" placeholder="いいね" min="0">
+			<input type="number" id="perfComments" placeholder="コメント数" min="0">
+			<button id="btnRecordPerf">記録</button>
+		</div>
+		<div id="feedbackView"></div>
+	</div>
+</section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/library.js"></script>
+<script src="js/scoring.js"></script>
+<script src="js/analysis.js"></script>
+<script src="js/generator.js"></script>
+<script src="js/renderer.js"></script>
+<script src="js/promptEngine.js"></script>
+<script src="js/claude.js"></script>
+<script src="js/critic.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
